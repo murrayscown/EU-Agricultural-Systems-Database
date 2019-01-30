@@ -1,0 +1,1555 @@
+---
+title: "D1_data_assembly_20190130"
+author: "Murray Scown"
+date: "30 January 2019"
+output: html_document
+---
+
+```{r setup}
+
+setwd("C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/")
+library(rgdal)
+library(sp)
+library(dplyr)
+library(sf)
+library(ggplot2)
+library(viridis)
+library(eurostat)
+
+```
+
+
+```{r import.data}
+
+geodata <- get_eurostat_geospatial(output_class = "spdf", year = "2016", resolution = "60") ###NOTE: NUTS 2016 ONLY FOR CROP, LIVESTOCK, AND ACCOUNTS PROCESSING
+
+nuts <- readOGR(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='NUTS_RG_01M_2013_3035_LEVL_2')
+head(nuts@data)
+str(nuts@data)
+
+#SDG variables
+sdg_data <- readOGR(dsn='C:/Users/mu5106sc/Dropbox/STAGS/SDG_data_eurostat/Final_database', layer='SDGs_database')
+head(sdg_data@data)
+str(sdg_data@data)
+names(sdg_data@data)
+sdg.dat <- sdg_data@data[,c(1:6,8:15,24:28)] #we will add organic farming, energies, employment, GDP later
+
+#here we replace SDG variables that were corrected after initial processing of database
+#Organic farming
+org.farm <- read.csv("C:/Users/mu5106sc/Dropbox/STAGS/SDG_data_eurostat/Final_database/SDGs/Goal2/Percentage_organic_farming/org_farm.csv", head=T)
+head(org.farm)
+sdg.dat <- left_join(sdg.dat, org.farm[,c(1,5)])
+
+#Energy consumption in agriculture
+energy.rt <- read.csv("C:/Users/mu5106sc/Dropbox/STAGS/SDG_data_eurostat/Final_database/SDGs/Goal7/Energy_use/energy_rate_in_ag_20190104.csv", head=T)
+ren.energy <- read.csv("C:/Users/mu5106sc/Dropbox/STAGS/SDG_data_eurostat/Final_database/SDGs/Goal7/Renewable_energy/ren_energy_pct_in_ag_20190104.csv", head=T)
+
+head(energy.rt)
+head(ren.energy)
+
+sdg.dat <- left_join(sdg.dat, energy.rt[,c(1,4)])
+sdg.dat <- left_join(sdg.dat, ren.energy[,c(1,4)])
+names(sdg.dat)[22] <- "renew_pct"
+
+sdg.dat[!is.na(sdg.dat$energy_rt), c("geo", "energy_rt", "renew_pct")]
+
+#Renewable energy production in agriculture
+ren.nrg.prod <- read.csv("C:/Users/mu5106sc/Dropbox/STAGS/SDG_data_eurostat/Final_database/SDGs/Goal7/Renewable_energy/c43_en_clean.csv", head=T)
+head(ren.nrg.prod)
+names(ren.nrg.prod)[3] <- "renew_prod"
+sdg.dat <- left_join(sdg.dat, ren.nrg.prod[,c(1,3)])
+
+#Gross Nutrient Balances
+gnb <- read.csv("C:/Users/mu5106sc/Dropbox/STAGS/SDG_data_eurostat/Final_database/SDGs/Goal2/Gross_nutrient_balance/gross_nutrient_balance_mean_allnuts.csv")
+head(gnb)
+sdg.dat <- left_join(sdg.dat, gnb)
+
+#Factor income from Eurostat table agr_r_accts has gaps that can be filled with NUTS0 data from table aact_eaa01
+afi.nuts0 <- read.csv("C:/Users/mu5106sc/Dropbox/STAGS/SDG_data_eurostat/Final_database/SDGs/Goal2/Agricultural_factor_income/factor_income_NUTS0_mean_allnuts.csv")
+head(afi.nuts0)
+(afi.na <- sdg.dat[which(is.na(sdg.dat$factor_in) & sdg.dat$STAT_LEVL_ == 0), 'geo'])
+(afi.nuts0.geo <- afi.nuts0[!is.na(afi.nuts0$factor_income_mean),'geo'])
+sdg.dat[which(is.na(sdg.dat$factor_in) & sdg.dat$geo %in% afi.nuts0.geo),c('geo', 'factor_in')]
+for(e in afi.nuts0.geo) {
+  sdg.dat[which(is.na(sdg.dat$factor_in) & sdg.dat$geo == e), 'factor_in'] <- afi.nuts0[which(afi.nuts0$geo == e), 'factor_income_mean']
+}
+sdg.dat[which(sdg.dat$geo %in% afi.na), c('geo', 'factor_in')]
+
+#additional consensus variables
+con_data <- readOGR(dsn='C:/Users/mu5106sc/Dropbox/STAGS/SDG_data_eurostat/Final_database', layer='Add_con_vars_database')
+head(con_data@data)
+str(con_data@data)
+names(con_data@data)
+con.dat <- con_data@data[,c(1:4,10:16,35)] #we will add labour productivity, soil cover, SOC, crop and livestock data later
+
+#here we add new eurostat variables to con.dat that were processed after the Add_con_vars_database was created
+awu_tot <- read.csv("C:/Users/mu5106sc/Dropbox/STAGS/SDG_data_eurostat/Final_database/Additional_consensus_variables/C22_labour_force_awu_total_mean_allnuts_20190104.csv", head=T)
+head(awu_tot)
+
+tot_uaa <- read.csv("C:/Users/mu5106sc/Dropbox/STAGS/SDG_data_eurostat/Final_database/Additional_consensus_variables/uaa_mean_allnuts.csv", head=T)
+head(tot_uaa)
+
+gva <- read.csv("C:/Users/mu5106sc/Dropbox/STAGS/SDG_data_eurostat/Final_database/Additional_consensus_variables/gross_value_added_mean_20190104.csv", head=T)
+head(gva)
+#There are some holes in this from Eurostat table agr_r_accts that can be filled with NUTS0 data from table aact_eaa01
+gva.2 <- read.csv("C:/Users/mu5106sc/Dropbox/STAGS/SDG_data_eurostat/Final_database/Additional_consensus_variables/gross_value_added_NUTS0_mean_allnuts_20190108.csv", head=T)
+head(gva.2)
+(gva.na <- gva[is.na(gva$gva), 'geo'])
+(gva.2.geo <- gva.2[!is.na(gva.2$c14_eea_gva),'geo'])
+gva[which(is.na(gva$gva) & gva$geo %in% gva.2.geo),]
+for(e in gva.2.geo) {
+  gva[which(is.na(gva$gva) & gva$geo == e), 'gva_mean'] <- gva.2[which(gva.2$geo == e), 'c14_eea_gva']
+}
+gva[which(gva$geo %in% gva.na),]
+
+#add to con.dat
+con.dat2 <- left_join(awu_tot, gva)
+con.dat2 <- left_join(con.dat2, tot_uaa)
+names(con.dat2)
+names(con.dat2)[2:4] <- c("tot_awu", "gva", "tot_uaa")
+head(con.dat2)
+
+con.dat <- left_join(con.dat, con.dat2)
+head(con.dat)
+
+#whole database for processing
+dbase <- as.data.frame(matrix(nrow=nrow(nuts@data), ncol=(ncol(sdg.dat[,-c(1:4)]) + ncol(con.dat[,-c(1:4)]) + 1)))
+dbase[,1] <- nuts@data$NUTS_ID
+names(dbase) <- c("NUTS_ID", names(sdg.dat)[-c(1:4)], names(con.dat)[-c(1:4)])
+head(dbase)
+nrow(dbase)
+
+```
+
+
+```{r SDGs.organise}
+#In this chunk, we will determine which NUTS2 have data for each variable, then apply NUTS1 or NUTS0 data to those NUTS2 without, wherever possible. We will do this in a function for all variables; however, directly translating NUTS1 or NUTS0 data to NUTS2 is only valid where the variable is a ratio (e.g., proportion, percentage, rate). In a later chunk, we will edit those variables that are absolute.
+
+#list to summarise where data are NUTS2, 1, 0 for each variable
+data.level <- vector("list", 4*length(names(dbase)[-1]))
+names(data.level) <- c(paste(names(dbase)[-1], 'n2.dat', sep='.'),
+                       paste(names(dbase)[-1], 'n1.dat', sep='.'),
+                       paste(names(dbase)[-1], 'n0.dat', sep='.'),
+                       paste(names(dbase)[-1], 'nuts0.na', sep='.')
+                       )
+labels(data.level)
+
+attach(sdg.dat)
+for(i in names(sdg.dat)[-c(1:4)]) {
+  (nuts2.na <- sdg.dat[STAT_LEVL_ == 2 & is.na(sdg.dat[,i]), 'geo'])
+  (nuts1 <- sdg.dat[STAT_LEVL_ == 1 & geo %in% gsub(".{1}$", "", nuts2.na), 'geo'])
+  (nuts1.na <- sdg.dat[geo %in% nuts1 & is.na(sdg.dat[,i]), 'geo'])
+  (nuts0 <- sdg.dat[STAT_LEVL_ == 0 & geo %in% gsub(".{1}$", "", nuts1.na), 'geo'])
+  (nuts0.na <- sdg.dat[geo %in% nuts0 & is.na(sdg.dat[,i]), 'geo'])
+  
+#NUTS2 data
+(n2.dat <- sdg.dat[!(geo %in% nuts2.na) & STAT_LEVL_ == 2, 'geo'])
+#NUTS1 data
+(n1.dat <- nuts1[!nuts1 %in% nuts1.na])
+#NUTS0 data
+(n0.dat <- nuts0[!nuts0 %in% nuts0.na])
+#NO DATA
+nuts0.na
+
+data.level[[paste(i, 'n2.dat', sep='.')]] <- n2.dat
+data.level[[paste(i, 'n1.dat', sep='.')]] <- n1.dat
+data.level[[paste(i, 'n0.dat', sep='.')]] <- n0.dat
+data.level[[paste(i, 'nuts0.na', sep='.')]] <- nuts0.na
+
+  for(e in n0.dat) {
+    dbase[dbase$NUTS_ID %in% dbase$NUTS_ID[grep(paste(e, '..', sep=''), dbase$NUTS_ID)], i] <- sdg.dat[sdg.dat$geo == e, i]
+  }
+
+  for(e in n1.dat) {
+    dbase[dbase$NUTS_ID %in% dbase$NUTS_ID[grep(paste(e, '.', sep=''), dbase$NUTS_ID)], i] <- sdg.dat[sdg.dat$geo == e, i]
+  }
+
+
+  for(e in n2.dat) {
+    dbase[dbase$NUTS_ID == e, i] <- sdg.dat[sdg.dat$geo == e, i]
+  }
+}
+detach(sdg.dat)
+
+summary(dbase)
+head(dbase)
+tail(dbase)
+
+summary(data.level)
+
+#check data level for risk_pov as an example
+data.level$risk_pov.n2.dat
+data.level$risk_pov.n1.dat
+data.level$risk_pov.n0.dat
+data.level$risk_pov.nuts0.na
+
+```
+
+
+```{r Consensus.variables.organise}
+
+#Now we repeat the above SDGs chunk for the additional consensus variables
+attach(con.dat)
+for(i in names(con.dat)[-c(1:4)]) {
+  (nuts2.na <- con.dat[STAT_LEVL_ == 2 & is.na(con.dat[,i]), 'geo'])
+  (nuts1 <- con.dat[STAT_LEVL_ == 1 & geo %in% gsub(".{1}$", "", nuts2.na), 'geo'])
+  (nuts1.na <- con.dat[geo %in% nuts1 & is.na(con.dat[,i]), 'geo'])
+  (nuts0 <- con.dat[STAT_LEVL_ == 0 & geo %in% gsub(".{1}$", "", nuts1.na), 'geo'])
+  (nuts0.na <- con.dat[geo %in% nuts0 & is.na(con.dat[,i]), 'geo'])
+  
+#NUTS2 data
+(n2.dat <- con.dat[!(geo %in% nuts2.na) & STAT_LEVL_ == 2, 'geo'])
+#NUTS1 data
+(n1.dat <- nuts1[!nuts1 %in% nuts1.na])
+#NUTS0 data
+(n0.dat <- nuts0[!nuts0 %in% nuts0.na])
+#NO DATA
+nuts0.na
+
+data.level[[paste(i, 'n2.dat', sep='.')]] <- n2.dat
+data.level[[paste(i, 'n1.dat', sep='.')]] <- n1.dat
+data.level[[paste(i, 'n0.dat', sep='.')]] <- n0.dat
+data.level[[paste(i, 'nuts0.na', sep='.')]] <- nuts0.na
+
+  for(e in n0.dat) {
+    dbase[dbase$NUTS_ID %in% dbase$NUTS_ID[grep(paste(e, '..', sep=''), dbase$NUTS_ID)], i] <- con.dat[con.dat$geo == e, i]
+  }
+  
+  for(e in n1.dat) {
+    dbase[dbase$NUTS_ID %in% dbase$NUTS_ID[grep(paste(e, '.', sep=''), dbase$NUTS_ID)], i] <- con.dat[con.dat$geo == e, i]
+  }
+
+  for(e in n2.dat) {
+    dbase[dbase$NUTS_ID == e, i] <- con.dat[con.dat$geo == e, i]
+  }
+}
+detach(con.dat)
+
+summary(dbase)
+head(dbase)
+tail(dbase)
+
+#check data level for conv_till as an example
+data.level$conv_till.n2.dat
+data.level$conv_till.n1.dat
+data.level$conv_till.n0.dat
+data.level$conv_till.nuts0.na
+
+```
+
+
+```{r UAA.refined}
+
+#Utilisted agricultural area (UAA) is an important variable for weighting the allocation of other variables through NUTS2 regions and for calculating proportions, etc.
+#The Eurostat UAA data is missing NUTS2 data in many areas. To fill these gaps, we will use the CORINE land cover dataset for an estimate of agricultural area (all CORINE categories in the 200s)
+
+corine.aa <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='nuts2_corine_ag_area_ha')
+corine.aa$geo <- corine.aa$NUTS_ID
+head(corine.aa)
+
+head(con.dat[,c("geo", "tot_uaa")])
+
+uaa.compare <- left_join(corine.aa[,c("geo", "SUM")], con.dat[,c("geo", "tot_uaa")])
+
+head(uaa.compare)
+plot(uaa.compare$tot_uaa ~ uaa.compare$SUM)
+cor(uaa.compare[,2:3])
+
+#Although the CORINE agricultural area slightly overestimates the Eurostat UAA data, the correlation is 1, so we will use CORINE agricultural area for its completeness
+
+#Next, we need to aggregate to NUTS1 and NUTS0 levels for calculations below
+nuts2.geos <- sdg.dat$geo[sdg.dat$STAT_LEVL_ == 2]
+nuts1.geos <- sdg.dat$geo[sdg.dat$STAT_LEVL_ == 1]
+nuts0.geos <- sdg.dat$geo[sdg.dat$STAT_LEVL_ == 0]
+
+uaa.nuts1 <- as.data.frame(nuts1.geos)
+names(uaa.nuts1) <- 'geo'
+uaa.nuts1$sum_uaa <- NA
+
+for(e in nuts1.geos) {
+  uaa.nuts1$sum_uaa[uaa.nuts1$geo == e] <- sum(uaa.compare$SUM[uaa.compare$geo %in% uaa.compare$geo[grep(paste(e, '.', sep=''), uaa.compare$geo)]])
+}
+
+head(uaa.nuts1)
+
+uaa.nuts0 <- as.data.frame(nuts0.geos)
+names(uaa.nuts0) <- 'geo'
+uaa.nuts0$sum_uaa <- NA
+
+for(e in nuts0.geos) {
+  uaa.nuts0$sum_uaa[uaa.nuts0$geo == e] <- sum(uaa.compare$SUM[uaa.compare$geo %in% uaa.compare$geo[grep(paste(e, '..', sep=''), uaa.compare$geo)]])
+}
+
+head(uaa.nuts0)
+
+#bind all dataframes together
+uaa.compare$sum_uaa <- uaa.compare$SUM
+corine.aa.all.nuts <- rbind(uaa.compare[,c(1,4)], uaa.nuts1, uaa.nuts0)
+head(corine.aa.all.nuts)
+tail(corine.aa.all.nuts)
+
+```
+
+
+```{r Alternative.sources.SDGs}
+
+#Here we use CAP Context Indicators to get better coverage of NUTS2 data for SDG variables currently at NUTS0
+
+#Volumes of water abstraction for irrigation are patchy and at the NUTS0 level from Eurostat. CAP Context Indicator C.39 contains NUTS1 and NUTS2 data in many areas from 2010, which we will use instead.
+#All zeros in this table were converted to no data due to uncertainty as to their accuracy
+cap.irrig <- read.csv("C:/Users/mu5106sc/Dropbox/STAGS/SDG_data_eurostat/Final_database/SDGs/Goal6/Irrigation_volume/C39_en_clean.csv", head=T)
+head(cap.irrig)
+summary(cap.irrig)
+
+#GDP from CAP Context Indicator C.08
+cap.gdp <- read.csv("C:/Users/mu5106sc/Dropbox/STAGS/SDG_data_eurostat/Final_database/Alternative_variables/c8_en_clean.csv", head=T)
+head(cap.gdp)
+
+#Employment rate from CAP Context Indicator C.05
+cap.emp <- read.csv("C:/Users/mu5106sc/Dropbox/STAGS/SDG_data_eurostat/Final_database/Alternative_variables/c5_en_clean.csv", head=T)
+head(cap.emp)
+cap.emp$geo <- cap.emp$NUTS_ID
+#EL51 is duplicated in this table, so deleted here
+cap.emp[cap.emp$geo == "EL51",]
+cap.emp <- cap.emp[-112,]
+
+#Youth and total unemployment from CAP Context Indicator C.07
+cap.unemp <- read.csv("C:/Users/mu5106sc/Dropbox/STAGS/SDG_data_eurostat/Final_database/Alternative_variables/c7_en_clean.csv", head=T)
+head(cap.unemp)
+
+#Merge tables
+add.cap.dat <- sdg_data@data[,1:2]
+add.cap.dat <- left_join(add.cap.dat, cap.irrig)
+add.cap.dat <- left_join(add.cap.dat, cap.gdp[,c(1,3,5)]) #Dont include regional data because of important differences between urban-rural typologies
+add.cap.dat <- left_join(add.cap.dat, cap.emp[,-1])
+add.cap.dat <- left_join(add.cap.dat, cap.unemp)
+
+head(add.cap.dat)
+names(add.cap.dat)
+nrow(add.cap.dat)
+summary(add.cap.dat)
+
+#create whole database for processing alternative CAP indicators
+dbase.cap <- as.data.frame(matrix(nrow=nrow(nuts@data), ncol=(ncol(add.cap.dat[,-2]))))
+dbase.cap[,1] <- nuts@data$NUTS_ID
+names(dbase.cap) <- c("NUTS_ID", names(add.cap.dat[,-c(1:2)]))
+head(dbase.cap)
+nrow(dbase.cap)
+
+#Repeat function above to allocate NUTS1 and NUTS0 to NUTS2 units. Again, this is appropriate for ratio variables but not absolute variables. This will be cleaned and corrected below.
+data.level.cap <- vector("list", 4*length(names(dbase.cap)[-1]))
+names(data.level.cap) <- c(paste(names(dbase.cap)[-1], 'n2.dat', sep='.'),
+                       paste(names(dbase.cap)[-1], 'n1.dat', sep='.'),
+                       paste(names(dbase.cap)[-1], 'n0.dat', sep='.'),
+                       paste(names(dbase.cap)[-1], 'nuts0.na', sep='.')
+                       )
+labels(data.level.cap)
+
+attach(add.cap.dat)
+for(i in names(add.cap.dat[,-c(1:2)])) {
+  (nuts2.na <- add.cap.dat[STAT_LEVL_ == 2 & is.na(add.cap.dat[,i]), 'geo'])
+  (nuts1 <- add.cap.dat[STAT_LEVL_ == 1 & geo %in% gsub(".{1}$", "", nuts2.na), 'geo'])
+  (nuts1.na <- add.cap.dat[geo %in% nuts1 & is.na(add.cap.dat[,i]), 'geo'])
+  (nuts0 <- add.cap.dat[STAT_LEVL_ == 0 & geo %in% gsub(".{1}$", "", nuts1.na), 'geo'])
+  (nuts0.na <- add.cap.dat[geo %in% nuts0 & is.na(add.cap.dat[,i]), 'geo'])
+  
+#NUTS2 data
+(n2.dat <- add.cap.dat[!(geo %in% nuts2.na) & STAT_LEVL_ == 2, 'geo'])
+#NUTS1 data
+(n1.dat <- nuts1[!nuts1 %in% nuts1.na])
+#NUTS0 data
+(n0.dat <- nuts0[!nuts0 %in% nuts0.na])
+#NO DATA
+nuts0.na
+
+data.level.cap[[paste(i, 'n2.dat', sep='.')]] <- n2.dat
+data.level.cap[[paste(i, 'n1.dat', sep='.')]] <- n1.dat
+data.level.cap[[paste(i, 'n0.dat', sep='.')]] <- n0.dat
+data.level.cap[[paste(i, 'nuts0.na', sep='.')]] <- nuts0.na
+
+  for(e in n0.dat) {
+    dbase.cap[dbase.cap$NUTS_ID %in% dbase.cap$NUTS_ID[grep(paste(e, '..', sep=''), dbase.cap$NUTS_ID)], i] <- add.cap.dat[add.cap.dat$geo == e, i]
+  }
+
+  for(e in n1.dat) {
+    dbase.cap[dbase.cap$NUTS_ID %in% dbase.cap$NUTS_ID[grep(paste(e, '.', sep=''), dbase.cap$NUTS_ID)], i] <- add.cap.dat[add.cap.dat$geo == e, i]
+  }
+
+  for(e in n2.dat) {
+    dbase.cap[dbase.cap$NUTS_ID == e, i] <- add.cap.dat[add.cap.dat$geo == e, i]
+  }
+}
+detach(add.cap.dat)
+
+summary(dbase.cap)
+head(dbase.cap)
+tail(dbase.cap)
+
+#check data level for irrig_vol as an example
+data.level.cap$irrig_vol.n2.dat
+data.level.cap$irrig_vol.n1.dat
+data.level.cap$irrig_vol.n0.dat
+data.level.cap$irrig_vol.nuts0.na
+
+#add GDP and PPS data for regional typologies
+names(dbase.cap)
+names(cap.gdp)
+cap.gdp$NUTS_ID <- cap.gdp$geo
+dbase.cap <- left_join(dbase.cap, cap.gdp[,c(7,9,11,13,15,17,18)])
+head(dbase.cap)
+names(dbase.cap)[c(3,8,10,12)] <- sub("eur", "gdp", names(dbase.cap)[c(3,8,10,12)])
+
+```
+
+
+```{r Cleaning.database}
+
+#In the chunks above, we allocate NUTS1 and NUTS0 data to NUTS2 regions. This works for variables that are ratios (e.g., percent, proportion, rates) but not for variables that are absolute. We need to edit these here. We also merge all the additional variables.
+
+names(dbase)
+names(corine.aa.all.nuts)
+names(dbase.cap)
+
+#The variables that have absolute values in dbase are:
+#factor_in (million euros)
+#tot_awu
+#gva
+#tot_uaa (ha)
+
+names(dbase)
+names(dbase)[c(3,31:33)]
+dbase.clean <- dbase[,-c(3,31:33)]
+dbase.clean$geo <- dbase.clean$NUTS_ID
+names(dbase.clean)
+
+#First, convert from absolute to ratios for those variables possible, then translate to NUTS2 regions as a ratio
+
+###factor_in
+names(sdg.dat)
+names(con.dat)
+afi.awu <- left_join(sdg.dat[,c("geo", "factor_in")], con.dat[,c("geo", "tot_awu")])
+afi.awu$afi_awu <- afi.awu$factor_in / afi.awu$tot_awu * 1e+06 #to convert to euros per awu
+head(afi.awu)
+
+#All Italy has zeros for factor income in the Eurostat table agr_r_accts but Italy has NUTS0 data from table aact_eaa01. We will correct here.
+afi.awu[which(afi.awu$afi_awu == 0), c('geo', 'afi_awu')]
+afi.nuts0[afi.nuts0$geo == "IT",]
+afi.awu[afi.awu$geo == "IT",]
+
+afi.awu[which(afi.awu$afi_awu == 0), 'afi_awu'] <- afi.nuts0[afi.nuts0$geo == "IT", 'factor_income_mean'] / afi.awu[afi.awu$geo == "IT", 'tot_awu'] * 1e+06
+
+afi.awu[afi.awu$geo == "IT",]
+
+###pesticides
+pesticides <- read.csv("C:/Users/mu5106sc/Dropbox/STAGS/SDG_data_eurostat/Final_database/SDGs/Goal12/Pesticide_sales/all_pesticide_sales_mean_allnuts.csv", head=T)
+head(pesticides)
+pest.rate <- left_join(con.dat[,c("geo", "tot_uaa")], pesticides)
+head(pest.rate)
+pest.rate$pest_rate <- pest.rate$pesticides_sum / pest.rate$tot_uaa
+summary(pest.rate)
+
+###irrig_tot
+irrig_tot <- read.csv("C:/Users/mu5106sc/Dropbox/STAGS/SDG_data_eurostat/SDGs/Goal6/Irrigation_volume/irrigation_volume_total_mean.csv", head=T)
+head(irrig_tot)
+names(irrig_tot)[c(1,3)] <- c("geo", "irrig_tot")
+irrig.rate <- left_join(sdg.dat[,c('geo', 'irrigated')], irrig_tot[,c('geo', 'irrig_tot')])
+irrig.rate <- left_join(irrig.rate, cap.irrig)
+irrig.rate <- left_join(irrig.rate, corine.aa.all.nuts)
+head(irrig.rate)
+irrig.rate[is.na(irrig.rate$irrig_vol),'irrig_vol'] <- irrig.rate[is.na(irrig.rate$irrig_vol), 'irrig_tot'] #use Eurostat data where CAP data is NA
+irrig.rate$irrig_rate <- irrig.rate$irrig_vol / irrig.rate$sum_uaa * 1e+03 #to convert to cubic metres per ha note this is total irrigation volume over all agricultural area, not just irrigated area, which is captured by the percentage of UAA irrigated
+
+###GVA per AWU
+gva.awu <- left_join(con.dat[,c("geo", "gva")], con.dat[,c("geo", "tot_awu")])
+gva.awu$gva_awu <- gva.awu$gva / gva.awu$tot_awu * 1e+06 #to convert to euros per awu
+head(gva.awu)
+
+###AWU relative to population aged 15-64
+pop_15_64 <- read.csv("C:/Users/mu5106sc/Dropbox/STAGS/SDG_data_eurostat/Final_database/SDGs/Goal8/Employment_rate/c5_en_population_15_64.csv", head=T)
+awu.pop <- left_join(con.dat[,c("geo", "tot_awu")], pop_15_64)
+awu.pop$labour_use <- awu.pop$tot_awu / (1000 * awu.pop$pop_15_64) #Pop in 1000s of persons, AWU in persons
+head(awu.pop)
+
+#add these variables to clean database using function from above
+add.edit.dat <- left_join(sdg.dat[,1:2], afi.awu[,c(1,4)])
+add.edit.dat <- left_join(add.edit.dat, gva.awu[,c(1,4)])
+add.edit.dat <- left_join(add.edit.dat, awu.pop[,c(1,4)])
+add.edit.dat <- left_join(add.edit.dat, pest.rate[,c(1,4)])
+add.edit.dat <- left_join(add.edit.dat, irrig.rate[,c(1,6)])
+head(add.edit.dat)
+
+dbase.clean$irrig_rate <- NA
+dbase.clean$afi_awu <- NA
+dbase.clean$gva_awu <- NA
+dbase.clean$labour_use <- NA
+dbase.clean$pest_rate <- NA
+
+edit.var.names <- c("irrig_rate",
+                    "afi_awu",
+                    "gva_awu",
+                    "labour_use",
+                    "pest_rate")
+
+#Repeat function above to allocate NUTS1 and NUTS0 to NUTS2 units. Again, this is appropriate for ratio variables but not absolute variables. This will be cleaned and corrected below.
+data.level.edit <- vector("list", 4*length(names(dbase.clean)[31:35]))
+names(data.level.edit) <- c(paste(names(dbase.clean)[31:35], 'n2.dat', sep='.'),
+                       paste(names(dbase.clean)[31:35], 'n1.dat', sep='.'),
+                       paste(names(dbase.clean)[31:35], 'n0.dat', sep='.'),
+                       paste(names(dbase.clean)[31:35], 'nuts0.na', sep='.')
+                       )
+labels(data.level.edit)
+
+attach(add.edit.dat)
+for(i in names(add.edit.dat[,-c(1:2)])) {
+  (nuts2.na <- add.edit.dat[STAT_LEVL_ == 2 & is.na(add.edit.dat[,i]), 'geo'])
+  (nuts1 <- add.edit.dat[STAT_LEVL_ == 1 & geo %in% gsub(".{1}$", "", nuts2.na), 'geo'])
+  (nuts1.na <- add.edit.dat[geo %in% nuts1 & is.na(add.edit.dat[,i]), 'geo'])
+  (nuts0 <- add.edit.dat[STAT_LEVL_ == 0 & geo %in% gsub(".{1}$", "", nuts1.na), 'geo'])
+  (nuts0.na <- add.edit.dat[geo %in% nuts0 & is.na(add.edit.dat[,i]), 'geo'])
+  
+#NUTS2 data
+(n2.dat <- add.edit.dat[!(geo %in% nuts2.na) & STAT_LEVL_ == 2, 'geo'])
+#NUTS1 data
+(n1.dat <- nuts1[!nuts1 %in% nuts1.na])
+#NUTS0 data
+(n0.dat <- nuts0[!nuts0 %in% nuts0.na])
+#NO DATA
+nuts0.na
+
+data.level.edit[[paste(i, 'n2.dat', sep='.')]] <- n2.dat
+data.level.edit[[paste(i, 'n1.dat', sep='.')]] <- n1.dat
+data.level.edit[[paste(i, 'n0.dat', sep='.')]] <- n0.dat
+data.level.edit[[paste(i, 'nuts0.na', sep='.')]] <- nuts0.na
+
+  for(e in n0.dat) {
+    dbase.clean[dbase.clean$NUTS_ID %in% dbase.clean$NUTS_ID[grep(paste(e, '..', sep=''), dbase.clean$NUTS_ID)], i] <- add.edit.dat[add.edit.dat$geo == e, i]
+  }
+
+  for(e in n1.dat) {
+    dbase.clean[dbase.clean$NUTS_ID %in% dbase.clean$NUTS_ID[grep(paste(e, '.', sep=''), dbase.clean$NUTS_ID)], i] <- add.edit.dat[add.edit.dat$geo == e, i]
+  }
+
+  for(e in n2.dat) {
+    dbase.clean[dbase.clean$NUTS_ID == e, i] <- add.edit.dat[add.edit.dat$geo == e, i]
+  }
+}
+detach(add.edit.dat)
+
+summary(dbase.clean)
+head(dbase.clean)
+tail(dbase.clean)
+names(dbase.clean)
+
+#check data level for irrig_vol as an example
+data.level.edit$irrig_rate.n2.dat
+data.level.edit$irrig_rate.n1.dat
+data.level.edit$irrig_rate.n0.dat
+data.level.edit$irrig_rate.nuts0.na
+
+#Add CAP data to clean database
+dbase.cap$geo <- dbase.cap$NUTS_ID
+names(dbase.cap)
+dbase.clean <- left_join(dbase.clean, dbase.cap[,c(3:14)])
+
+```
+
+
+```{r GIS.variables}
+
+###Emissions data
+emi_co2eq <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='mean_rate_co2_eqv')
+emi_co2eq$geo <- emi_co2eq$NUTS_ID
+head(emi_co2eq)
+
+emi_nh3 <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='mean_rate_nh3')
+emi_nh3$geo <- emi_nh3$NUTS_ID
+head(emi_nh3)
+
+emi_pm10 <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='mean_rate_pm10')
+emi_pm10$geo <- emi_pm10$NUTS_ID
+head(emi_pm10)
+
+emi_pm25 <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='mean_rate_pm25')
+emi_pm25$geo <- emi_pm25$NUTS_ID
+head(emi_pm25)
+
+###Soils data
+soc <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='nuts2_SOC_2010_stats')
+soc$geo <- soc$NUTS_ID
+head(soc)
+
+biol_threats <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='nuts2_soil_bio_func_threat_stats')
+biol_threats$geo <- biol_threats$NUTS_ID
+head(biol_threats)
+
+soil_cov <- read.csv("C:/Users/mu5106sc/Dropbox/STAGS/SDG_data_eurostat/Final_database/Additional_consensus_variables/nuts2_Cfactor_20180822.csv", head=T)
+soil_cov$geo <- soil_cov$NUTS_ID
+head(soil_cov)
+
+###Habitat conservation data
+nat2000_ag <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='nuts2_ag_Natura2000')
+nat2000_tot <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='nuts2_Natura2000_area')
+nat2000_tot$ha <- nat2000_tot$SUM * 6.25 #Sum of number of 250m x 250m (6.25 ha) cells
+nat2000 <- merge(nat2000_ag[,c(1,5)], nat2000_tot[,c(1,6)])
+nat2000$geo <- nat2000$NUTS_ID
+nat2000 <- left_join(nat2000, nuts@data[,c(4,7)])
+nat2000 <- left_join(nat2000, corine.aa.all.nuts)
+head(nat2000) #SUM, ha, and sum_uaa in hectares, Shape_Area in m2
+nat2000$nat2000_ag <- nat2000$SUM / nat2000$sum_uaa
+nat2000$nat2000_pr <- nat2000$ha / (nat2000$Shape_Area / 10000)
+head(nat2000)
+
+###Calories data
+calorie_fr <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='nuts2_mean_kcalFr')
+calorie_fr$geo <- calorie_fr$NUTS_ID
+names(calorie_fr)[5] <- 'cal_frac'
+head(calorie_fr)
+
+###Suitability data
+precip <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='nuts2_mean_ann_precip')
+precip$geo <- precip$NUTS_ID
+names(precip)[5] <- 'precip'
+head(precip)
+
+deg_days <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='nuts2_mean_gdd')
+deg_days$geo <- deg_days$NUTS_ID
+names(deg_days)[5] <- 'deg_days'
+head(deg_days)
+
+crop_suit <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='nuts2_mean_crop_suit')
+crop_suit$geo <- crop_suit$NUTS_ID
+names(crop_suit)[5] <- 'crop_suit'
+head(crop_suit)
+
+#Join all GIS tables
+gis.dat <- soil_cov[,c("geo", "C_factor")] #soil_cov is most complete of these tables (nrow = 320)
+gis.dat <- left_join(gis.dat, emi_co2eq[,c("geo", "MEAN")])
+names(gis.dat)[3] <- "emi_co2eq"
+gis.dat <- left_join(gis.dat, emi_nh3[,c("geo", "MEAN")])
+names(gis.dat)[4] <- "emi_nh3"
+gis.dat <- left_join(gis.dat, emi_pm10[,c("geo", "MEAN")])
+names(gis.dat)[5] <- "emi_pm10"
+gis.dat <- left_join(gis.dat, emi_pm25[,c("geo", "MEAN")])
+names(gis.dat)[6] <- "emi_pm25"
+gis.dat <- left_join(gis.dat, soc[,c("geo", "MEAN")])
+names(gis.dat)[7] <- "soc"
+gis.dat <- left_join(gis.dat, biol_threats[,c("geo", "MEAN")])
+names(gis.dat)[8] <- "biol_threats"
+gis.dat <- left_join(gis.dat, nat2000[,c("geo", "nat2000_ag", "nat2000_pr")])
+gis.dat <- left_join(gis.dat, calorie_fr[,c("geo", "cal_frac")])
+gis.dat <- left_join(gis.dat, precip[,c("geo", "precip")])
+gis.dat <- left_join(gis.dat, deg_days[,c("geo", "deg_days")])
+gis.dat <- left_join(gis.dat, crop_suit[,c("geo", "crop_suit")])
+head(gis.dat)
+
+#Join GIS data to clean database
+names(dbase.clean)
+names(gis.dat)
+nrow(dbase.clean)
+nrow(gis.dat)
+dbase.clean.gis <- left_join(dbase.clean, gis.dat)
+head(dbase.clean.gis)
+
+```
+
+
+```{r eurostat.crop.area}
+
+#First, we work with only those NUTS regions with crop areas > 0 to avoid spurious yield values later
+crop.area.dat <- read.csv("C:/Users/mu5106sc/Dropbox/STAGS/SDG_data_eurostat/Final_database/Crop_area_yield/croparea_no_0s_mean_allnuts.csv", head=T)
+
+names(crop.area.dat)
+names(geodata@data)
+crop.area.dat <- left_join(crop.area.dat, geodata@data[,c(4,7)])
+
+#Need to adjust the NUTS2016 data to NUTS2013 codes
+crop.area.dat.2013nuts <- crop.area.dat
+names(crop.area.dat.2013nuts)
+crop.area.dat.2013nuts$geo16 <- crop.area.dat.2013nuts$geo
+nuts.conv <- read.csv("C:/Users/mu5106sc/Dropbox/STAGS/SDG_data_eurostat/Final_database/Crop_area_yield/NUTS2013-NUTS2016_2.csv", head=T)[,1:4]
+head(nuts.conv)
+levels(nuts.conv$Change)
+
+#straight recodes
+for(e in nuts.conv[nuts.conv$Change == "recoded", 'Code.2016']) {
+  crop.area.dat.2013nuts[crop.area.dat.2013nuts$geo16 == e, 'geo'] <- as.character(nuts.conv[nuts.conv$Code.2016 == e, 'Code.2013'])
+}
+#check
+crop.area.dat.2013nuts[crop.area.dat.2013nuts$geo16 %in% nuts.conv[nuts.conv$Change == "recoded", 'Code.2016'], c('geo', 'geo16')]
+
+#recode and relabel
+crop.area.dat.2013nuts[crop.area.dat.2013nuts$geo16 == "FRB0", 'geo'] <- "FR24"
+
+#splits
+crop.area.dat.2013nuts[crop.area.dat.2013nuts$geo16 %in% c("LT01", "LT02"), 'geo'] <- "LT00"
+crop.area.dat.2013nuts[crop.area.dat.2013nuts$geo16 %in% c("HU11", "HU12"), 'geo'] <- "HU10"
+crop.area.dat.2013nuts[crop.area.dat.2013nuts$geo16 %in% c("PL91", "PL92"), 'geo'] <- "PL12"
+crop.area.dat.2013nuts[crop.area.dat.2013nuts$geo16 %in% c("UKM8", "UKM9"), 'geo'] <- "UKM3" #approximate split not including NUTS3 UKM24
+crop.area.dat.2013nuts[crop.area.dat.2013nuts$geo16 == "UKM7", 'geo'] <- "UKM2" #approximate recode still including NUTS3 UKM24
+
+#IE
+#Cannot translate data from new regions to old NUTS2013 so use NUTS0 data
+crop.area.dat.2013nuts[crop.area.dat.2013nuts$geo16 == 'IE',]
+
+## Calculate sum over the split NUTS2 regions
+head(crop.area.dat.2013nuts)
+crop.area.dat.2013nuts.sum <- crop.area.dat.2013nuts %>% group_by(geo) %>% summarise(rye_a = sum(rye_a,na.rm = F),
+                  barley_a = sum(barley_a,na.rm = F),
+                  maize_a = sum(maize_a,na.rm = F),
+                  tritic_a = sum(tritic_a,na.rm = F),
+                  sorghum_a = sum(sorghum_a,na.rm = F),
+                  oth_cer_a = sum(oth_cer_a,na.rm = F),
+                  rice_a = sum(rice_a,na.rm = F),
+                  pasture_a = sum(pasture_a,na.rm = F),
+                  rape_a = sum(rape_a,na.rm = F),
+                  sunflow_a = sum(sunflow_a,na.rm = F),
+                  pulses_a = sum(pulses_a,na.rm = F),
+                  potato_a = sum(potato_a,na.rm = F),
+                  sugbeet_a = sum(sugbeet_a,na.rm = F),
+                  oth_rt_a = sum(oth_rt_a,na.rm = F),
+                  wheat_a = sum(wheat_a,na.rm = F),
+                  oats_a = sum(oats_a,na.rm = F),
+                  oth_oil_a = sum(oth_oil_a,na.rm = F),
+                  fibre_a = sum(fibre_a,na.rm = F),
+                  oth_ind_a = sum(oth_ind_a,na.rm = F),
+                  fodder_a = sum(fodder_a,na.rm = F),
+                  LEVL_CODE = mean(LEVL_CODE,na.rm = F)
+                  )
+head(crop.area.dat.2013nuts.sum)
+nrow(crop.area.dat.2013nuts.sum)
+
+#We calculate the fraction of agricultural area within each NUTS0, NUTS1, and NUTS2 area using the UAA from CORINE
+#First, join UAA dataframe to crop area dataframe
+head(corine.aa.all.nuts)
+names(crop.area.dat.2013nuts.sum)
+crop.area.dat.2013nuts.sum <- left_join(crop.area.dat.2013nuts.sum, corine.aa.all.nuts)
+summary(crop.area.dat.2013nuts.sum)
+
+#Second, calculate the fraction of area
+crop.frac <- as.data.frame(crop.area.dat.2013nuts.sum)
+names(crop.frac)[2:21] <- gsub("_a", "_f", names(crop.frac)[2:21])
+crop.frac[,2:21] <- 1000 * crop.area.dat.2013nuts.sum[,2:21] / crop.area.dat.2013nuts.sum$sum_uaa
+crop.frac$total_f <- rowSums(crop.frac[,2:21], na.rm = T)
+summary(crop.frac)
+#Spurious fractions
+crop.frac[which(crop.frac$total_f > 1), 'geo']
+crop.frac[which(crop.frac$wheat_f > 1), 'geo'] 
+
+as.data.frame(crop.area.dat.2013nuts.sum[which(crop.area.dat.2013nuts.sum$geo %in% c("BE1", "BE10")),]) 
+#The Brussels region (BE10)  has wheat fraction > 1, and total fraction >> 1, so we will give NA
+crop.frac[which(crop.frac$geo %in% c("BE1", "BE10")), c(2:21,24)] <- NA
+crop.frac[which(crop.frac$geo %in% c("BE1", "BE10")),]
+
+```
+
+
+```{r eurostat.crop.zero.areas}
+
+#Here we add the NUTS with crop areas equal to zero, which were removed in the first crop.frac calculation due to spurious values when calculating yields. Where NA's exist in crop.frac, we add these new values, which are zeros.
+crop.0.area.dat <- read.csv("C:/Users/mu5106sc/Dropbox/STAGS/SDG_data_eurostat/Final_database/Crop_area_yield/croparea_mean_allnuts.csv", head=T)
+
+names(crop.0.area.dat)
+names(geodata@data)
+crop.0.area.dat <- left_join(crop.0.area.dat, geodata@data[,c(4,7)])
+
+#Need to adjust the NUTS2016 data to NUTS2013 codes
+crop.0.area.dat.2013nuts <- crop.0.area.dat
+names(crop.0.area.dat.2013nuts)
+crop.0.area.dat.2013nuts$geo16 <- crop.0.area.dat.2013nuts$geo
+
+#straight recodes
+for(e in nuts.conv[nuts.conv$Change == "recoded", 'Code.2016']) {
+  crop.0.area.dat.2013nuts[crop.0.area.dat.2013nuts$geo16 == e, 'geo'] <- as.character(nuts.conv[nuts.conv$Code.2016 == e, 'Code.2013'])
+}
+#check
+crop.0.area.dat.2013nuts[crop.0.area.dat.2013nuts$geo16 %in% nuts.conv[nuts.conv$Change == "recoded", 'Code.2016'], c('geo', 'geo16')]
+
+#recode and relabel
+crop.0.area.dat.2013nuts[crop.0.area.dat.2013nuts$geo16 == "FRB0", 'geo'] <- "FR24"
+
+#splits
+crop.0.area.dat.2013nuts[crop.0.area.dat.2013nuts$geo16 %in% c("LT01", "LT02"), 'geo'] <- "LT00"
+crop.0.area.dat.2013nuts[crop.0.area.dat.2013nuts$geo16 %in% c("HU11", "HU12"), 'geo'] <- "HU10"
+crop.0.area.dat.2013nuts[crop.0.area.dat.2013nuts$geo16 %in% c("PL91", "PL92"), 'geo'] <- "PL12"
+crop.0.area.dat.2013nuts[crop.0.area.dat.2013nuts$geo16 %in% c("UKM8", "UKM9"), 'geo'] <- "UKM3" #approximate split not including NUTS3 UKM24
+crop.0.area.dat.2013nuts[crop.0.area.dat.2013nuts$geo16 == "UKM7", 'geo'] <- "UKM2" #approximate recode still including NUTS3 UKM24
+
+#IE
+#Cannot translate data from new regions to old NUTS2013 so use NUTS0 data
+crop.0.area.dat.2013nuts[crop.0.area.dat.2013nuts$geo16 == 'IE',]
+
+## Calculate sum over the split NUTS2 regions
+head(crop.0.area.dat.2013nuts)
+crop.0.area.dat.2013nuts.sum <- crop.0.area.dat.2013nuts %>% group_by(geo) %>% summarise(rye_a = sum(rye_a,na.rm = F),
+                  barley_a = sum(barley_a,na.rm = F),
+                  maize_a = sum(maize_a,na.rm = F),
+                  tritic_a = sum(tritic_a,na.rm = F),
+                  sorghum_a = sum(sorghum_a,na.rm = F),
+                  oth_cer_a = sum(oth_cer_a,na.rm = F),
+                  rice_a = sum(rice_a,na.rm = F),
+                  pasture_a = sum(pasture_a,na.rm = F),
+                  rape_a = sum(rape_a,na.rm = F),
+                  sunflow_a = sum(sunflow_a,na.rm = F),
+                  pulses_a = sum(pulses_a,na.rm = F),
+                  potato_a = sum(potato_a,na.rm = F),
+                  sugbeet_a = sum(sugbeet_a,na.rm = F),
+                  oth_rt_a = sum(oth_rt_a,na.rm = F),
+                  wheat_a = sum(wheat_a,na.rm = F),
+                  oats_a = sum(oats_a,na.rm = F),
+                  oth_oil_a = sum(oth_oil_a,na.rm = F),
+                  fibre_a = sum(fibre_a,na.rm = F),
+                  oth_ind_a = sum(oth_ind_a,na.rm = F),
+                  fodder_a = sum(fodder_a,na.rm = F),
+                  LEVL_CODE = mean(LEVL_CODE,na.rm = F)
+                  )
+head(crop.0.area.dat.2013nuts.sum)
+nrow(crop.0.area.dat.2013nuts.sum)
+
+#We calculate the fraction of agricultural area within each NUTS0, NUTS1, and NUTS2 area using the UAA from CORINE
+#First, join UAA dataframe to crop area dataframe
+head(corine.aa.all.nuts)
+names(crop.0.area.dat.2013nuts.sum)
+crop.0.area.dat.2013nuts.sum <- left_join(crop.0.area.dat.2013nuts.sum, corine.aa.all.nuts)
+summary(crop.0.area.dat.2013nuts.sum)
+
+#Second, calculate the fraction of area
+crop.frac.0 <- as.data.frame(crop.0.area.dat.2013nuts.sum)
+names(crop.frac.0)[2:21] <- gsub("_a", "_f", names(crop.frac.0)[2:21])
+crop.frac.0[,2:21] <- 1000 * crop.0.area.dat.2013nuts.sum[,2:21] / crop.0.area.dat.2013nuts.sum$sum_uaa
+crop.frac.0$total_f <- rowSums(crop.frac.0[,2:21], na.rm = T)
+summary(crop.frac.0)
+#Spurious fractions
+crop.frac.0[which(crop.frac.0$total_f > 1), 'geo']
+crop.frac.0[which(crop.frac.0$wheat_f > 1), 'geo'] 
+
+as.data.frame(crop.0.area.dat.2013nuts.sum[which(crop.0.area.dat.2013nuts.sum$geo %in% c("BE1", "BE10")),]) 
+#The Brussels region (BE10)  has wheat fraction > 1, and total fraction >> 1, so we will give NA
+crop.frac.0[which(crop.frac.0$geo %in% c("BE1", "BE10")), c(2:21,24)] <- NA
+crop.frac.0[which(crop.frac.0$geo %in% c("BE1", "BE10")),]
+
+#Next, replace NA's in crop area with zero areas, where data exist
+summary(crop.frac)
+summary(crop.frac.0)
+
+crop.frac.rep <- crop.frac
+for(e in crop.frac.rep$geo) {
+  for(i in names(crop.frac.rep)[2:21]) {
+    crop.frac.rep[crop.frac.rep$geo == e,i] <- ifelse(is.na(crop.frac.rep[crop.frac.rep$geo == e,i]), crop.frac.0[crop.frac.0$geo == e, i], crop.frac[crop.frac$geo == e, i])
+  }
+}
+
+summary(crop.frac.rep)
+
+#Finally, run script to allocate NUTS1 or NUTS0 fractions to NUTS2 where needed
+
+#list to summarise where data are NUTS2, 1, 0 for each variable
+data.level.crop.f.0 <- vector("list", 4*length(names(crop.frac.rep)[2:21]))
+names(data.level.crop.f.0) <- c(paste(names(crop.frac.rep)[2:21], 'n2.dat', sep='.'),
+                       paste(names(crop.frac.rep)[2:21], 'n1.dat', sep='.'),
+                       paste(names(crop.frac.rep)[2:21], 'n0.dat', sep='.'),
+                       paste(names(crop.frac.rep)[2:21], 'nuts0.na', sep='.')
+                       )
+labels(data.level.crop.f.0)
+
+
+dbase.crop <- as.data.frame(matrix(nrow=nrow(nuts@data), ncol=(ncol(crop.frac.rep[,2:21]) + 1)))
+dbase.crop[,1] <- nuts@data$NUTS_ID
+names(dbase.crop) <- c("NUTS_ID", names(crop.frac.rep)[2:21])
+head(dbase.crop)
+nrow(dbase.crop)
+  
+attach(crop.frac.rep)
+for(i in names(crop.frac.rep)[2:21]) {
+  (nuts2.na <- crop.frac.rep[LEVL_CODE == 2 & is.na(crop.frac.rep[,i]), 'geo'])
+  (nuts1 <- crop.frac.rep[LEVL_CODE == 1 & geo %in% gsub(".{1}$", "", nuts2.na), 'geo'])
+  (nuts1.na <- crop.frac.rep[geo %in% nuts1 & is.na(crop.frac.rep[,i]), 'geo'])
+  (nuts0 <- crop.frac.rep[LEVL_CODE == 0 & geo %in% gsub(".{1}$", "", nuts1.na), 'geo'])
+  (nuts0.na <- crop.frac.rep[geo %in% nuts0 & is.na(crop.frac.rep[,i]), 'geo'])
+  
+#NUTS2 data
+(n2.dat <- crop.frac.rep[!(geo %in% nuts2.na) & LEVL_CODE == 2, 'geo'])
+#NUTS1 data
+(n1.dat <- nuts1[!nuts1 %in% nuts1.na])
+#NUTS0 data
+(n0.dat <- nuts0[!nuts0 %in% nuts0.na])
+#NO DATA
+nuts0.na
+
+data.level.crop.f.0[[paste(i, 'n2.dat', sep='.')]] <- n2.dat
+data.level.crop.f.0[[paste(i, 'n1.dat', sep='.')]] <- n1.dat
+data.level.crop.f.0[[paste(i, 'n0.dat', sep='.')]] <- n0.dat
+data.level.crop.f.0[[paste(i, 'nuts0.na', sep='.')]] <- nuts0.na
+
+  for(e in n0.dat) {
+    dbase.crop[dbase.crop$NUTS_ID %in% dbase.crop$NUTS_ID[grep(paste(e, '..', sep=''), dbase.crop$NUTS_ID)], i] <- crop.frac.rep[crop.frac.rep$geo == e, i]
+  }
+
+  for(e in n1.dat) {
+    dbase.crop[dbase.crop$NUTS_ID %in% dbase.crop$NUTS_ID[grep(paste(e, '.', sep=''), dbase.crop$NUTS_ID)], i] <- crop.frac.rep[crop.frac.rep$geo == e, i]
+  }
+
+  for(e in n2.dat) {
+    dbase.crop[dbase.crop$NUTS_ID == e, i] <- crop.frac.rep[crop.frac.rep$geo == e, i]
+  }
+}
+detach(crop.frac.rep)
+
+summary(dbase.crop)
+head(dbase.crop)
+tail(dbase.crop)
+
+#check data level for rye_f as an example
+length(data.level.crop.f.0$rye_f.n2.dat)
+length(data.level.crop.f.0$rye_f.n1.dat)
+data.level.crop.f.0$rye_f.n0.dat
+data.level.crop.f.0$rye_f.nuts0.na
+
+```
+
+
+```{r eurostat.crop.yield}
+
+#Here we manually calculate yields, using only those NUTS regions that have area > 0 for each crop.
+
+crop.prod.dat <- read.csv("C:/Users/mu5106sc/Dropbox/STAGS/SDG_data_eurostat/Final_database/Crop_area_yield/cropprod_no_0s_mean_allnuts.csv", head=T)
+
+head(crop.area.dat)
+head(crop.prod.dat)
+
+nrow(crop.area.dat)
+nrow(crop.prod.dat)
+
+crop.yield.dat <- left_join(crop.area.dat, crop.prod.dat)
+names(crop.yield.dat)
+
+#Need to adjust the NUTS2016 data to NUTS2013 codes
+crop.yield.dat.2013nuts <- crop.yield.dat
+names(crop.yield.dat.2013nuts)
+crop.yield.dat.2013nuts$geo16 <- crop.yield.dat.2013nuts$geo
+
+#straight recodes
+for(e in nuts.conv[nuts.conv$Change == "recoded", 'Code.2016']) {
+  crop.yield.dat.2013nuts[crop.yield.dat.2013nuts$geo16 == e, 'geo'] <- as.character(nuts.conv[nuts.conv$Code.2016 == e, 'Code.2013'])
+}
+#check
+crop.yield.dat.2013nuts[crop.yield.dat.2013nuts$geo16 %in% nuts.conv[nuts.conv$Change == "recoded", 'Code.2016'], c('geo', 'geo16')]
+
+#recode and relabel
+crop.yield.dat.2013nuts[crop.yield.dat.2013nuts$geo16 == "FRB0", 'geo'] <- "FR24"
+
+#splits
+crop.yield.dat.2013nuts[crop.yield.dat.2013nuts$geo16 %in% c("LT01", "LT02"), 'geo'] <- "LT00"
+crop.yield.dat.2013nuts[crop.yield.dat.2013nuts$geo16 %in% c("HU11", "HU12"), 'geo'] <- "HU10"
+crop.yield.dat.2013nuts[crop.yield.dat.2013nuts$geo16 %in% c("PL91", "PL92"), 'geo'] <- "PL12"
+crop.yield.dat.2013nuts[crop.yield.dat.2013nuts$geo16 %in% c("UKM8", "UKM9"), 'geo'] <- "UKM3" #approximate split not including NUTS3 UKM24
+crop.yield.dat.2013nuts[crop.yield.dat.2013nuts$geo16 == "UKM7", 'geo'] <- "UKM2" #approximate recode still including NUTS3 UKM24
+
+#IE
+#Cannot translate data from new regions to old NUTS2013 so use NUTS0 data
+crop.yield.dat.2013nuts[crop.yield.dat.2013nuts$geo16 == 'IE',]
+
+## Calculate sum over the split NUTS2 regions
+head(crop.yield.dat.2013nuts)
+crop.yield.dat.2013nuts.sum <- crop.yield.dat.2013nuts %>% group_by(geo) %>% summarise(rye_a = sum(rye_a,na.rm = F),
+                  barley_a = sum(barley_a,na.rm = F),
+                  maize_a = sum(maize_a,na.rm = F),
+                  tritic_a = sum(tritic_a,na.rm = F),
+                  sorghum_a = sum(sorghum_a,na.rm = F),
+                  oth_cer_a = sum(oth_cer_a,na.rm = F),
+                  rice_a = sum(rice_a,na.rm = F),
+                  pasture_a = sum(pasture_a,na.rm = F),
+                  rape_a = sum(rape_a,na.rm = F),
+                  sunflow_a = sum(sunflow_a,na.rm = F),
+                  pulses_a = sum(pulses_a,na.rm = F),
+                  potato_a = sum(potato_a,na.rm = F),
+                  sugbeet_a = sum(sugbeet_a,na.rm = F),
+                  oth_rt_a = sum(oth_rt_a,na.rm = F),
+                  wheat_a = sum(wheat_a,na.rm = F),
+                  oats_a = sum(oats_a,na.rm = F),
+                  oth_oil_a = sum(oth_oil_a,na.rm = F),
+                  fibre_a = sum(fibre_a,na.rm = F),
+                  oth_ind_a = sum(oth_ind_a,na.rm = F),
+                  fodder_a = sum(fodder_a,na.rm = F),
+                  rye_p = sum(rye_p,na.rm = F),
+                  barley_p = sum(barley_p,na.rm = F),
+                  maize_p = sum(maize_p,na.rm = F),
+                  tritic_p = sum(tritic_p,na.rm = F),
+                  sorghum_p = sum(sorghum_p,na.rm = F),
+                  oth_cer_p = sum(oth_cer_p,na.rm = F),
+                  rice_p = sum(rice_p,na.rm = F),
+                  pasture_p = sum(pasture_p,na.rm = F),
+                  rape_p = sum(rape_p,na.rm = F),
+                  sunflow_p = sum(sunflow_p,na.rm = F),
+                  pulses_p = sum(pulses_p,na.rm = F),
+                  potato_p = sum(potato_p,na.rm = F),
+                  sugbeet_p = sum(sugbeet_p,na.rm = F),
+                  oth_rt_p = sum(oth_rt_p,na.rm = F),
+                  wheat_p = sum(wheat_p,na.rm = F),
+                  oats_p = sum(oats_p,na.rm = F),
+                  oth_oil_p = sum(oth_oil_p,na.rm = F),
+                  fibre_p = sum(fibre_p,na.rm = F),
+                  oth_ind_p = sum(oth_ind_p,na.rm = F),
+                  fodder_p = sum(fodder_p,na.rm = F),
+                  LEVL_CODE = mean(LEVL_CODE,na.rm = F)
+                  )
+head(crop.yield.dat.2013nuts.sum)
+nrow(crop.yield.dat.2013nuts.sum)
+
+#Second, calculate yield in tonnes / ha (original Eurostat area units are 1000 ha and production units are 1000 tonnes)
+crop.yield <- as.data.frame(crop.yield.dat.2013nuts.sum[,c(1:21,42)])
+names(crop.yield)[2:21] <- gsub("_a", "_y", names(crop.yield)[2:21])
+names(crop.yield.dat.2013nuts.sum[,22:41])
+names(crop.yield.dat.2013nuts.sum[,2:21])
+crop.yield[,2:21] <- crop.yield.dat.2013nuts.sum[,22:41] / crop.yield.dat.2013nuts.sum[,2:21]
+summary(crop.yield)
+
+#is.na(crop.yield) <- sapply(crop.yield, is.infinite) #Remove the infinites
+is.na(crop.yield) <- sapply(crop.yield, is.nan) #Remove NaN
+summary(crop.yield) #still some spurious values
+#Whipe BE1, BE10 because of spurios areas (see above)
+crop.yield[which(crop.yield$geo %in% c("BE1", "BE10")), c(2:21)] <- NA
+
+summary(crop.yield)
+
+#Spurious values checked by looking at Eurostat database for statistical outliers and spatial outliers based on maps
+
+#Spurious rye
+crop.yield[which(crop.yield$rye_y > 6), c('geo', 'rye_y')]
+crop.yield[crop.yield$geo %in% crop.yield$geo[grep('ITF', crop.yield$geo)], c('geo', 'rye_y')]
+crop.yield[crop.yield$geo %in% crop.yield$geo[grep('ITC', crop.yield$geo)], c('geo', 'rye_y')]
+crop.yield[which(crop.yield$geo == "ITC2"), 'rye_y'] <- crop.yield[which(crop.yield$geo == "ITC"), 'rye_y']
+crop.yield[which(crop.yield$geo == "ITF3"), 'rye_y'] <- crop.yield[which(crop.yield$geo == "ITF"), 'rye_y']
+
+crop.yield[crop.yield$geo %in% crop.yield$geo[grep('SE', crop.yield$geo)], c('geo', 'rye_y')]
+crop.yield[crop.yield$geo == "SE11", 'rye_y'] <- crop.yield[crop.yield$geo == "SE1", 'rye_y']
+
+crop.yield[crop.yield$geo %in% c("SE31", "SE32"), 'rye_y'] <- crop.yield[crop.yield$geo == "SE3", 'rye_y']
+
+#Spurious barley
+crop.yield[which(crop.yield$barley_y > 10), c('geo', 'barley_y')]
+crop.yield[crop.yield$geo %in% crop.yield$geo[grep('ITC', crop.yield$geo)], c('geo', 'barley_y')]
+crop.yield[which(crop.yield$geo == "ITC2"), 'barley_y'] <- crop.yield[which(crop.yield$geo == "ITC"), 'barley_y']
+
+summary(crop.yield)
+
+#Spurious sorghum
+crop.yield[which(crop.yield$sorghum_y > 8), c('geo', 'sorghum_y')]
+
+crop.yield[crop.yield$geo %in% crop.yield$geo[grep('EL4', crop.yield$geo)], c('geo', 'sorghum_y')]
+crop.yield[crop.yield$geo %in% c("EL4", "EL43"), 'sorghum_y'] <- mean(crop.yield[crop.yield$geo %in% c("EL41", "EL42"), 'sorghum_y'])
+
+crop.yield[crop.yield$geo %in% crop.yield$geo[grep('ES2', crop.yield$geo)], c('geo', 'sorghum_y')]
+crop.yield[crop.yield$geo == "ES22", 'sorghum_y'] <- crop.yield[crop.yield$geo == "ES2", 'sorghum_y']
+
+crop.yield[crop.yield$geo %in% crop.yield$geo[grep('CH', crop.yield$geo)], c('geo', 'sorghum_y')]
+crop.yield[crop.yield$geo %in% c("CH0", "CH02"), 'sorghum_y'] <- mean(crop.yield[crop.yield$geo %in% c("CH01", "CH03", "CH06"), 'sorghum_y'])
+
+summary(crop.yield)
+
+#Spurious rape
+crop.yield[which(crop.yield$rape_y > 4), c('geo', 'rape_y')]
+crop.yield[crop.yield$geo %in% c("ITG", "ITG1", "ITG2"), c('geo', 'rape_y')]
+crop.yield[crop.yield$geo == "ITG1", 'rape_y'] <- crop.yield[crop.yield$geo == "ITG", 'rape_y']
+
+#Spurious sunflower
+crop.yield[which(crop.yield$sunflow_y > 3), c('geo', 'sunflow_y')]
+
+crop.yield[crop.yield$geo %in% c("ITF", "ITF1", "ITF2", "ITF3", "ITF4", "ITF5", "ITF6"), c('geo', 'sunflow_y')]
+crop.yield[crop.yield$geo %in% c("ITG", "ITG1", "ITG2"), c('geo', 'sunflow_y')]
+
+crop.yield[crop.yield$geo == "ITF5", 'sunflow_y'] <- mean(crop.yield[crop.yield$geo %in% c("ITF1", "ITF2", "ITF3", "ITF4", "ITF6"), 'sunflow_y'])
+
+crop.yield[crop.yield$geo == "ITG", 'sunflow_y'] <- mean(crop.yield[crop.yield$geo %in% c("ITG1", "ITG2"), 'sunflow_y'])
+
+#Spurious pulses
+crop.yield[which(crop.yield$pulses_y > 5), c('geo', 'pulses_y')]
+
+crop.yield[crop.yield$geo %in% crop.yield$geo[grep('ITC', crop.yield$geo)], c('geo', 'pulses_y')]
+crop.yield[crop.yield$geo == "ITC3", 'pulses_y'] <- crop.yield[crop.yield$geo == "ITC", 'pulses_y']
+crop.yield[crop.yield$geo == "ME", 'pulses_y'] <- NA
+
+summary(crop.yield)
+
+#Spurious sugar beet
+crop.yield[crop.yield$geo %in% crop.yield$geo[grep('SE', crop.yield$geo)], c('geo', 'sugbeet_y')]
+crop.yield[crop.yield$geo %in% crop.yield$geo[grep('SE1', crop.yield$geo)], 'sugbeet_y'] <- crop.yield[crop.yield$geo == "SE", 'sugbeet_y']
+
+#Spurious potatoes
+crop.yield[crop.yield$geo %in% crop.yield$geo[grep('SE', crop.yield$geo)], c('geo', 'potato_y')]
+crop.yield[crop.yield$geo == "SE11", 'potato_y'] <- crop.yield[crop.yield$geo == "SE1", 'potato_y']
+
+#Spurious other oil crops
+crop.yield[which(crop.yield$oth_oil_y > 5), c('geo', 'oth_oil_y')]
+
+crop.yield[crop.yield$geo %in% crop.yield$geo[grep('BE', crop.yield$geo)], c('geo', 'oth_oil_y')]
+crop.yield[crop.yield$geo == "BE", 'oth_oil_y'] <- mean(crop.yield[crop.yield$geo %in% c("BE2", "BE3"), 'oth_oil_y'])
+
+crop.yield.dat.2013nuts.sum[which(crop.yield.dat.2013nuts.sum$geo == "CY"), c('geo', 'oth_oil_a', 'oth_oil_p')]
+crop.yield[crop.yield$geo %in% c("CY0", "CY00"), 'oth_oil_y'] <- crop.yield[crop.yield$geo == "CY", 'oth_oil_y']
+
+crop.yield[crop.yield$geo %in% crop.yield$geo[grep('ES6', crop.yield$geo)], c('geo', 'oth_oil_y')]
+crop.yield[crop.yield$geo == "ES62", 'oth_oil_y'] <- crop.yield[crop.yield$geo == "ES6", 'oth_oil_y']
+
+crop.yield[crop.yield$geo %in% crop.yield$geo[grep('ITF', crop.yield$geo)], c('geo', 'oth_oil_y')]
+crop.yield[crop.yield$geo == "ITF4", 'oth_oil_y'] <- crop.yield[crop.yield$geo == "ITF", 'oth_oil_y']
+
+summary(crop.yield)
+
+#Spurious fibre crops
+crop.yield[which(crop.yield$fibre_y > 6), c('geo', 'fibre_y')]
+crop.yield[which(crop.yield$geo == "CH"), 'fibre_y'] <- NA
+
+summary(crop.yield)
+
+#Spurious other industrial crops
+crop.yield[which(crop.yield$oth_ind_y > 10), c('geo', 'oth_ind_y')]
+crop.yield[crop.yield$geo == "EL62", 'oth_ind_y'] <- crop.yield[crop.yield$geo == "EL6", 'oth_ind_y']
+
+summary(crop.yield)
+
+#Finally, run script to allocate NUTS1 or NUTS0 fractions to NUTS2 where needed
+
+#list to summarise where data are NUTS2, 1, 0 for each variable
+data.level.crop.y <- vector("list", 4*length(names(crop.yield)[2:21]))
+names(data.level.crop.y) <- c(paste(names(crop.yield)[2:21], 'n2.dat', sep='.'),
+                       paste(names(crop.yield)[2:21], 'n1.dat', sep='.'),
+                       paste(names(crop.yield)[2:21], 'n0.dat', sep='.'),
+                       paste(names(crop.yield)[2:21], 'nuts0.na', sep='.')
+                       )
+labels(data.level.crop.y)
+
+
+dbase.yield <- as.data.frame(matrix(nrow=nrow(nuts@data), ncol=(ncol(crop.yield[,2:21]) + 1)))
+dbase.yield[,1] <- nuts@data$NUTS_ID
+names(dbase.yield) <- c("NUTS_ID", names(crop.yield)[2:21])
+head(dbase.yield)
+nrow(dbase.yield)
+  
+attach(crop.yield)
+for(i in names(crop.yield)[2:21]) {
+  (nuts2.na <- crop.yield[LEVL_CODE == 2 & is.na(crop.yield[,i]), 'geo'])
+  (nuts1 <- crop.yield[LEVL_CODE == 1 & geo %in% gsub(".{1}$", "", nuts2.na), 'geo'])
+  (nuts1.na <- crop.yield[geo %in% nuts1 & is.na(crop.yield[,i]), 'geo'])
+  (nuts0 <- crop.yield[LEVL_CODE == 0 & geo %in% gsub(".{1}$", "", nuts1.na), 'geo'])
+  (nuts0.na <- crop.yield[geo %in% nuts0 & is.na(crop.yield[,i]), 'geo'])
+  
+#NUTS2 data
+(n2.dat <- crop.yield[!(geo %in% nuts2.na) & LEVL_CODE == 2, 'geo'])
+#NUTS1 data
+(n1.dat <- nuts1[!nuts1 %in% nuts1.na])
+#NUTS0 data
+(n0.dat <- nuts0[!nuts0 %in% nuts0.na])
+#NO DATA
+nuts0.na
+
+data.level.crop.y[[paste(i, 'n2.dat', sep='.')]] <- n2.dat
+data.level.crop.y[[paste(i, 'n1.dat', sep='.')]] <- n1.dat
+data.level.crop.y[[paste(i, 'n0.dat', sep='.')]] <- n0.dat
+data.level.crop.y[[paste(i, 'nuts0.na', sep='.')]] <- nuts0.na
+
+  for(e in n0.dat) {
+    dbase.yield[dbase.yield$NUTS_ID %in% dbase.yield$NUTS_ID[grep(paste(e, '..', sep=''), dbase.yield$NUTS_ID)], i] <- crop.yield[crop.yield$geo == e, i]
+  }
+
+  for(e in n1.dat) {
+    dbase.yield[dbase.yield$NUTS_ID %in% dbase.yield$NUTS_ID[grep(paste(e, '.', sep=''), dbase.yield$NUTS_ID)], i] <- crop.yield[crop.yield$geo == e, i]
+  }
+
+  for(e in n2.dat) {
+    dbase.yield[dbase.yield$NUTS_ID == e, i] <- crop.yield[crop.yield$geo == e, i]
+  }
+}
+detach(crop.yield)
+
+summary(dbase.yield)
+head(dbase.yield)
+tail(dbase.yield)
+
+#check data level for rye_f as an example
+data.level.crop.y$rye_y.n2.dat
+data.level.crop.y$rye_y.n1.dat
+data.level.crop.y$rye_y.n0.dat
+data.level.crop.y$rye_y.nuts0.na
+
+#Final fix of spurious data
+#London region (UKI)
+dbase.yield[dbase.yield$NUTS_ID %in% dbase.yield$NUTS_ID[grep('UK', dbase.yield$NUTS_ID)],c('NUTS_ID', 'oats_y', 'rye_y', 'barley_y')]
+
+dbase.yield[dbase.yield$NUTS_ID %in% dbase.yield$NUTS_ID[grep('UKI', dbase.yield$NUTS_ID)], c('oats_y', 'rye_y', 'barley_y')] <- NA
+
+#Make all zero yields NAs
+names(dbase.yield)
+for(e in names(dbase.yield)[-1]) {
+  dbase.yield[which(dbase.yield[,e] == 0), e] <- NA
+}
+
+```
+
+
+```{r earthstat.crop.area.yield}
+
+#Crop areas
+berries_a <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='crop_berries_a')
+names(berries_a)[5] <- 'berries_a'
+head(berries_a)
+
+brassic_a <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='crop_brassic_a')
+names(brassic_a)[5] <- 'brassic_a'
+head(brassic_a)
+
+citrus_a <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='crop_citrus_a')
+names(citrus_a)[5] <- 'citrus_a'
+head(citrus_a)
+
+frtrees_a <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='crop_frtrees_a')
+names(frtrees_a)[5] <- 'frtrees_a'
+head(frtrees_a)
+
+grapes_a <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='crop_grapes_a')
+names(grapes_a)[5] <- 'grapes_a'
+head(grapes_a)
+
+greens_a <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='crop_greens_a')
+names(greens_a)[5] <- 'greens_a'
+head(greens_a)
+
+nuts_a <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='crop_nuts_a')
+names(nuts_a)[5] <- 'nuts_a'
+head(nuts_a)
+
+olives_a <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='crop_olives_a')
+names(olives_a)[5] <- 'olives_a'
+head(olives_a)
+
+oth_veg_a <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='crop_oth_veg_a')
+names(oth_veg_a)[5] <- 'oth_veg_a'
+head(oth_veg_a)
+
+peas_a <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='crop_peas_a')
+names(peas_a)[5] <- 'peas_a'
+head(peas_a)
+
+rootveg_a <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='crop_rootveg_a')
+names(rootveg_a)[5] <- 'rootveg_a'
+head(rootveg_a)
+
+tropfr_a <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='crop_tropfr_a')
+names(tropfr_a)[5] <- 'tropfr_a'
+head(tropfr_a)
+
+vfruits_a <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='crop_vfruits_a')
+names(vfruits_a)[5] <- 'vfruits_a'
+head(vfruits_a)
+
+#Crop yields
+berries_y <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='crop_berries_y')
+names(berries_y)[5] <- 'berries_y'
+head(berries_y)
+
+brassic_y <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='crop_brassic_y')
+names(brassic_y)[5] <- 'brassic_y'
+head(brassic_y)
+
+citrus_y <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='crop_citrus_y')
+names(citrus_y)[5] <- 'citrus_y'
+head(citrus_y)
+
+frtrees_y <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='crop_frtrees_y')
+names(frtrees_y)[5] <- 'frtrees_y'
+head(frtrees_y)
+
+grapes_y <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='crop_grapes_y')
+names(grapes_y)[5] <- 'grapes_y'
+head(grapes_y)
+
+greens_y <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='crop_greens_y')
+names(greens_y)[5] <- 'greens_y'
+head(greens_y)
+
+nuts_y <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='crop_nuts_y')
+names(nuts_y)[5] <- 'nuts_y'
+head(nuts_y)
+
+olives_y <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='crop_olives_y')
+names(olives_y)[5] <- 'olives_y'
+head(olives_y)
+
+oth_veg_y <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='crop_oth_veg_y')
+names(oth_veg_y)[5] <- 'oth_veg_y'
+head(oth_veg_y)
+
+peas_y <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='crop_peas_y')
+names(peas_y)[5] <- 'peas_y'
+head(peas_y)
+
+rootveg_y <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='crop_rootveg_y')
+names(rootveg_y)[5] <- 'rootveg_y'
+head(rootveg_y)
+
+tropfr_y <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='crop_tropfr_y')
+names(tropfr_y)[5] <- 'tropfr_y'
+head(tropfr_y)
+
+vfruits_y <- st_read(dsn='C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/EU_Farming_Systems_20181015.gdb', layer='crop_vfruits_y')
+names(vfruits_y)[5] <- 'vfruits_y'
+head(vfruits_y)
+
+#Merge all tables
+crop.earthstat <- berries_a[,c(1,5)]
+crop.earthstat <- left_join(crop.earthstat, brassic_a[,c(1,5)])
+crop.earthstat <- left_join(crop.earthstat, citrus_a[,c(1,5)])
+crop.earthstat <- left_join(crop.earthstat, frtrees_a[,c(1,5)])
+crop.earthstat <- left_join(crop.earthstat, grapes_a[,c(1,5)])
+crop.earthstat <- left_join(crop.earthstat, greens_a[,c(1,5)])
+crop.earthstat <- left_join(crop.earthstat, nuts_a[,c(1,5)])
+crop.earthstat <- left_join(crop.earthstat, olives_a[,c(1,5)])
+crop.earthstat <- left_join(crop.earthstat, oth_veg_a[,c(1,5)])
+crop.earthstat <- left_join(crop.earthstat, peas_a[,c(1,5)])
+crop.earthstat <- left_join(crop.earthstat, rootveg_a[,c(1,5)])
+crop.earthstat <- left_join(crop.earthstat, tropfr_a[,c(1,5)])
+crop.earthstat <- left_join(crop.earthstat, vfruits_a[,c(1,5)])
+
+crop.earthstat <- left_join(crop.earthstat, berries_y[,c(1,5)])
+crop.earthstat <- left_join(crop.earthstat, brassic_y[,c(1,5)])
+crop.earthstat <- left_join(crop.earthstat, citrus_y[,c(1,5)])
+crop.earthstat <- left_join(crop.earthstat, frtrees_y[,c(1,5)])
+crop.earthstat <- left_join(crop.earthstat, grapes_y[,c(1,5)])
+crop.earthstat <- left_join(crop.earthstat, greens_y[,c(1,5)])
+crop.earthstat <- left_join(crop.earthstat, nuts_y[,c(1,5)])
+crop.earthstat <- left_join(crop.earthstat, olives_y[,c(1,5)])
+crop.earthstat <- left_join(crop.earthstat, oth_veg_y[,c(1,5)])
+crop.earthstat <- left_join(crop.earthstat, peas_y[,c(1,5)])
+crop.earthstat <- left_join(crop.earthstat, rootveg_y[,c(1,5)])
+crop.earthstat <- left_join(crop.earthstat, tropfr_y[,c(1,5)])
+crop.earthstat <- left_join(crop.earthstat, vfruits_y[,c(1,5)])
+
+head(crop.earthstat)
+summary(crop.earthstat)
+
+#Calculate fraction of agricultural area
+head(corine.aa.all.nuts)
+crop.earthstat$geo <- crop.earthstat$NUTS_ID
+crop.earthstat <- left_join(crop.earthstat, corine.aa.all.nuts)
+
+crop.earthstat$berries_f <- crop.earthstat$berries_a / crop.earthstat$sum_uaa
+crop.earthstat$brassic_f <- crop.earthstat$brassic_a / crop.earthstat$sum_uaa
+crop.earthstat$citrus_f <- crop.earthstat$citrus_a / crop.earthstat$sum_uaa
+crop.earthstat$frtrees_f <- crop.earthstat$frtrees_a / crop.earthstat$sum_uaa
+crop.earthstat$grapes_f <- crop.earthstat$grapes_a / crop.earthstat$sum_uaa
+crop.earthstat$greens_f <- crop.earthstat$greens_a / crop.earthstat$sum_uaa
+crop.earthstat$nuts_f <- crop.earthstat$nuts_a / crop.earthstat$sum_uaa
+crop.earthstat$olives_f <- crop.earthstat$olives_a / crop.earthstat$sum_uaa
+crop.earthstat$oth_veg_f <- crop.earthstat$oth_veg_a / crop.earthstat$sum_uaa
+crop.earthstat$peas_f <- crop.earthstat$peas_a / crop.earthstat$sum_uaa
+crop.earthstat$rootveg_f <- crop.earthstat$rootveg_a / crop.earthstat$sum_uaa
+crop.earthstat$tropfr_f <- crop.earthstat$tropfr_a / crop.earthstat$sum_uaa
+crop.earthstat$vfruits_f <- crop.earthstat$vfruits_a / crop.earthstat$sum_uaa
+
+summary(crop.earthstat)
+
+#Remove zero yields from regions with zero crop areas
+names(crop.earthstat)
+
+for(e in gsub('_a', '', names(crop.earthstat)[2:14])) {
+  crop.earthstat[crop.earthstat[,paste(e, '_a', sep='')] == 0, paste(e, '_y', sep='')] <- NA
+}
+
+#Check for berries
+crop.earthstat[crop.earthstat$berries_a == 0, c('NUTS_ID', 'berries_a', 'berries_y')]
+
+```
+
+
+```{r livestock}
+
+livestock <- read.csv("C:/Users/mu5106sc/Dropbox/STAGS/SDG_data_eurostat/Final_database/Livestock/livestock_mean_allnuts.csv", head=T)
+head(livestock)
+
+#Need to adjust the NUTS2016 data to NUTS2013 codes
+livestock.2013nuts <- livestock
+names(livestock.2013nuts)
+livestock.2013nuts$geo16 <- livestock.2013nuts$geo
+livestock.2013nuts$geo <- as.character(livestock.2013nuts$geo)
+livestock.2013nuts <- left_join(livestock.2013nuts, geodata@data[,c(4,7)])
+
+#straight recodes
+for(e in nuts.conv[nuts.conv$Change == "recoded", 'Code.2016']) {
+  livestock.2013nuts[livestock.2013nuts$geo16 == e, 'geo'] <- as.character(nuts.conv[nuts.conv$Code.2016 == e, 'Code.2013'])
+}
+#check
+livestock.2013nuts[livestock.2013nuts$geo16 %in% nuts.conv[nuts.conv$Change == "recoded", 'Code.2016'], c('geo', 'geo16')]
+
+#recode and relabel
+livestock.2013nuts[livestock.2013nuts$geo16 == "FRB0", 'geo'] <- "FR24"
+
+#splits
+livestock.2013nuts[livestock.2013nuts$geo16 %in% c("LT01", "LT02"), 'geo'] <- "LT00"
+livestock.2013nuts[livestock.2013nuts$geo16 %in% c("HU11", "HU12"), 'geo'] <- "HU10"
+livestock.2013nuts[livestock.2013nuts$geo16 %in% c("PL91", "PL92"), 'geo'] <- "PL12"
+livestock.2013nuts[livestock.2013nuts$geo16 %in% c("UKM8", "UKM9"), 'geo'] <- "UKM3" #approximate split not including NUTS3 UKM24
+livestock.2013nuts[livestock.2013nuts$geo16 == "UKM7", 'geo'] <- "UKM2" #approximate recode still including NUTS3 UKM24
+
+#IE
+#Cannot translate data from new regions to old NUTS2013 so use NUTS0 data
+livestock.2013nuts[livestock.2013nuts$geo16 == 'IE',]
+
+## Calculate sum over the split NUTS2 regions
+head(livestock.2013nuts)
+livestock.2013nuts.sum <- livestock.2013nuts %>% group_by(geo) %>% summarise(bovine = sum(bovine,na.rm = F),
+                  milk_cows = sum(milk_cows,na.rm = F),
+                  pigs = sum(pigs,na.rm = F),
+                  sheep = sum(sheep,na.rm = F),
+                  goats = sum(goats,na.rm = F),
+                  LEVL_CODE = mean(LEVL_CODE,na.rm = F)
+                  )
+head(livestock.2013nuts.sum)
+nrow(livestock.2013nuts.sum)
+
+#Next, we calculate livestock density
+#Join UAA dataframe to livestock dataframe
+head(corine.aa.all.nuts)
+names(livestock.2013nuts.sum)
+livestock.2013nuts.sum <- left_join(livestock.2013nuts.sum, corine.aa.all.nuts)
+livestock.dens <- as.data.frame(livestock.2013nuts.sum[,1:7])
+livestock.dens[,2:6] <- 1000 * livestock.2013nuts.sum[,2:6] / livestock.2013nuts.sum$sum_uaa
+
+summary(livestock.dens)
+
+#Spurious sheep and goats
+livestock.dens[which(livestock.dens$sheep > 3), c('geo', 'sheep', 'goats')]
+
+as.data.frame(livestock.2013nuts.sum[livestock.2013nuts.sum$geo %in% livestock.2013nuts.sum$geo[grep('AT', livestock.2013nuts.sum$geo)], c('geo', 'sheep', 'goats', 'sum_uaa')])
+
+livestock.dens[which(livestock.dens$geo %in% livestock.2013nuts.sum$geo[grep('AT', livestock.2013nuts.sum$geo)]), c('geo', 'sheep', 'goats')]
+
+livestock.dens[livestock.dens$geo == "AT13", c('sheep', 'goats')] <- livestock.dens[livestock.dens$geo == "AT1", c('sheep', 'goats')]
+
+livestock.dens[livestock.dens$geo == "AT11", 'goats'] <- livestock.dens[livestock.dens$geo == "AT1", 'goats']
+
+#Finally, run script to allocate NUTS1 or NUTS0 densities to NUTS2 where needed
+#list to summarise where data are NUTS2, 1, 0 for each variable
+data.level.livestock <- vector("list", 4*length(names(livestock.dens)[2:6]))
+names(data.level.livestock) <- c(paste(names(livestock.dens)[2:6], 'n2.dat', sep='.'),
+                       paste(names(livestock.dens)[2:6], 'n1.dat', sep='.'),
+                       paste(names(livestock.dens)[2:6], 'n0.dat', sep='.'),
+                       paste(names(livestock.dens)[2:6], 'nuts0.na', sep='.')
+                       )
+labels(data.level.livestock)
+
+dbase.livestock <- as.data.frame(matrix(nrow=nrow(nuts@data), ncol=(ncol(livestock.dens[,2:6]) + 1)))
+dbase.livestock[,1] <- nuts@data$NUTS_ID
+names(dbase.livestock) <- c("NUTS_ID", names(livestock.dens)[2:6])
+head(dbase.livestock)
+nrow(dbase.livestock)
+
+attach(livestock.dens)
+for(i in names(livestock.dens)[2:6]) {
+  (nuts2.na <- livestock.dens[LEVL_CODE == 2 & is.na(livestock.dens[,i]), 'geo'])
+  (nuts1 <- livestock.dens[LEVL_CODE == 1 & geo %in% gsub(".{1}$", "", nuts2.na), 'geo'])
+  (nuts1.na <- livestock.dens[geo %in% nuts1 & is.na(livestock.dens[,i]), 'geo'])
+  (nuts0 <- livestock.dens[LEVL_CODE == 0 & geo %in% gsub(".{1}$", "", nuts1.na), 'geo'])
+  (nuts0.na <- livestock.dens[geo %in% nuts0 & is.na(livestock.dens[,i]), 'geo'])
+  
+#NUTS2 data
+(n2.dat <- livestock.dens[!(geo %in% nuts2.na) & LEVL_CODE == 2, 'geo'])
+#NUTS1 data
+(n1.dat <- nuts1[!nuts1 %in% nuts1.na])
+#NUTS0 data
+(n0.dat <- nuts0[!nuts0 %in% nuts0.na])
+#NO DATA
+nuts0.na
+
+data.level.livestock[[paste(i, 'n2.dat', sep='.')]] <- n2.dat
+data.level.livestock[[paste(i, 'n1.dat', sep='.')]] <- n1.dat
+data.level.livestock[[paste(i, 'n0.dat', sep='.')]] <- n0.dat
+data.level.livestock[[paste(i, 'nuts0.na', sep='.')]] <- nuts0.na
+
+  for(e in n0.dat) {
+    dbase.livestock[dbase.livestock$NUTS_ID %in% dbase.livestock$NUTS_ID[grep(paste(e, '..', sep=''), dbase.livestock$NUTS_ID)], i] <- livestock.dens[livestock.dens$geo == e, i]
+  }
+
+  for(e in n1.dat) {
+    dbase.livestock[dbase.livestock$NUTS_ID %in% dbase.livestock$NUTS_ID[grep(paste(e, '.', sep=''), dbase.livestock$NUTS_ID)], i] <- livestock.dens[livestock.dens$geo == e, i]
+  }
+
+  for(e in n2.dat) {
+    dbase.livestock[dbase.livestock$NUTS_ID == e, i] <- livestock.dens[livestock.dens$geo == e, i]
+  }
+}
+detach(livestock.dens)
+
+summary(dbase.livestock)
+head(dbase.livestock)
+tail(dbase.livestock)
+
+#check data level for bovine as an example
+data.level.livestock$bovine.n2.dat
+data.level.livestock$bovine.n1.dat
+data.level.livestock$bovine.n0.dat
+data.level.livestock$bovine.nuts0.na
+
+```
+
+
+```{r Add.crop.livestock.dbase}
+
+names(dbase.clean.gis)
+#Edit a few names to avoid truncation
+names(dbase.clean.gis)[c(36,37,41:46)] <- c("gdp_cap", "pps_cap", sub("_cap", "", names(dbase.clean.gis)[41:46]))
+names(dbase.clean.gis)[38] <- "emp_rate"
+names(dbase.clean.gis)[53] <- "bio_threat"
+
+names(dbase.crop)
+names(dbase.yield)
+names(crop.earthstat)
+names(dbase.livestock)
+
+dbase.final <- left_join(dbase.clean.gis[,-30], dbase.crop)
+dbase.final <- left_join(dbase.final, dbase.yield)
+dbase.final <- left_join(dbase.final, crop.earthstat[,-c(2:14,28,29)])
+dbase.final <- left_join(dbase.final, dbase.livestock)
+
+head(dbase.final)
+names(dbase.final)
+summary(dbase.final)
+
+```
+
+
+```{r Spatial.database}
+
+head(dbase.final)
+head(nuts@data)
+
+sp.dbase <- nuts
+sp.dbase@data <- left_join(nuts@data, dbase.final)
+
+```
+
+
+```{r shapefile}
+
+names(sp.dbase@data) 
+dbase.shp <- sp.dbase
+names(dbase.shp@data)
+#We exclude some variables
+dbase.shp@data <- dbase.shp@data[,-c(2,3)]
+
+#Make NAs -99999 for shapefile
+summary(dbase.shp@data)
+dbase.shp@data[is.na(dbase.shp@data)] <- -99999
+summary(dbase.shp@data)
+
+```
+
+
+```{r save}
+
+save.image("C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/Database_20190130.RData")
+write.csv(dbase.final, "C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/Database_20190130.csv")
+
+names(dbase.shp)
+writeOGR(dbase.shp, dsn="C:/Users/mu5106sc/Dropbox/STAGS/D1_Database/Shapefiles/D1_database_20190130.shp", layer="D1_database_20190130", driver="ESRI Shapefile")
+
+```
+
